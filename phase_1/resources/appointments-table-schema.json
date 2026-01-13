@@ -1,0 +1,16 @@
+{
+  "TableName": "Appointments",
+  "AttributeDefinitions": [
+    {
+      "AttributeName": "appointmentId",
+      "AttributeType": "S"
+    }
+  ],
+  "KeySchema": [
+    {
+      "AttributeName": "appointmentId",
+      "KeyType": "HASH"
+    }
+  ],
+  "BillingMode": "PAY_PER_REQUEST"
+}

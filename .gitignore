@@ -1,4 +1,68 @@
+# ===============================
+# General
+# ===============================
 .DS_Store
+Thumbs.db
+*.log
+
+# ===============================
+# Git
+# ===============================
+.git/
+.gitignore~
+
+# ===============================
+# Python
+# ===============================
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.env
+.venv/
+venv/
+ENV/
+env/
+pip-wheel-metadata/
+.pytest_cache/
+
+# ===============================
+# AWS / Deployment Artifacts
+# ===============================
+.aws/
+samconfig.toml
+*.zip
+*.tar.gz
+package/
+dist/
+build/
+
+# ===============================
+# Secrets / Credentials
+# ===============================
+*.pem
+*.key
+*.crt
+*.json
+!appointments-table-schema.json
+!template.json
+
+# ===============================
+# Node / Frontend
+# ===============================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ===============================
+# IDE / Editor
+# ===============================
 .vscode/
 .idea/
-.env
+*.swp
+
+# ===============================
+# OS / Misc
+# ===============================
+.cache/
