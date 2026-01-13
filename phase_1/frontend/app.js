@@ -1,251 +1,400 @@
-// ---------- Helpers ----------
-const $ = (id) => document.getElementById(id);
-
-function setStatus(el, type, msg) {
-  el.className = `status ${type || "muted"}`;
-  el.textContent = msg;
-}
-
-function safeText(v) {
-  return (v === null || v === undefined) ? "" : String(v);
-}
-
-function normalizeSlot(raw) {
-  // Try to handle different lambda response shapes
-  // Expected attributes in your report: appointmentId, appointmentDate, appointmentTime, status
-  return {
-    appointmentId: raw.appointmentId ?? raw.id ?? raw.slotId ?? raw.pk ?? "",
-    appointmentDate: raw.appointmentDate ?? raw.date ?? "",
-    appointmentTime: raw.appointmentTime ?? raw.time ?? "",
-    status: raw.status ?? raw.slotStatus ?? "UNKNOWN",
+/* global window */
+/* global fetch */
+/*global localStorage*/
+(() => {
+  const cfg = window.APP_CONFIG || {};
+  const apiBaseUrl = (cfg.apiBaseUrl || "").replace(/\/$/, "");
+  const endpoints = {
+    slots: `${apiBaseUrl}/appointment-slot`,
+    book: `${apiBaseUrl}/book-appointment`,
   };
-}
 
-function matchesFilters(slot, dateValue, searchValue) {
-  if (dateValue) {
-    if (slot.appointmentDate !== dateValue) return false;
-  }
-  if (searchValue) {
-    const hay = `${slot.appointmentDate} ${slot.appointmentTime} ${slot.appointmentId} ${slot.status}`.toLowerCase();
-    if (!hay.includes(searchValue.toLowerCase())) return false;
-  }
-  return true;
-}
+  const els = {
+    envPill: document.getElementById("envPill"),
+    refreshBtn: document.getElementById("refreshBtn"),
 
-function badgeClass(status) {
-  const s = (status || "").toUpperCase();
-  if (s === "AVAILABLE") return "available";
-  if (s === "PENDING") return "pending";
-  return "na";
-}
+    patientName: document.getElementById("patientName"),
+    patientEmail: document.getElementById("patientEmail"),
+    patientHint: document.getElementById("patientHint"),
 
-// ---------- API ----------
-const apiBaseUrl = window.APP_CONFIG?.apiBaseUrl?.replace(/\/$/, "");
-if (!apiBaseUrl || apiBaseUrl.includes("REPLACE_WITH")) {
-  console.warn("Set your API base URL in config.js");
-}
+    dateFilter: document.getElementById("dateFilter"),
+    timeFilter: document.getElementById("timeFilter"),
+    resetFiltersBtn: document.getElementById("resetFiltersBtn"),
+    lastUpdated: document.getElementById("lastUpdated"),
+    statusText: document.getElementById("statusText"),
+    slotsCount: document.getElementById("slotsCount"),
+    slots: document.getElementById("slots"),
 
-async function apiGetSlots() {
-  const url = `${apiBaseUrl}/appointment-slot`;
-  const res = await fetch(url, { method: "GET" });
+    debugBtn: document.getElementById("debugBtn"),
+    debugPanel: document.getElementById("debugPanel"),
+    debugShowIds: document.getElementById("debugShowIds"),
+    debugShowCache: document.getElementById("debugShowCache"),
+    cacheStatus: document.getElementById("cacheStatus"),
 
-  if (!res.ok) {
-    const t = await res.text().catch(() => "");
-    throw new Error(`GET /appointment-slot failed (${res.status}). ${t}`);
+    toastHost: document.getElementById("toastHost"),
+  };
+
+  /** ---------- helpers ---------- */
+  function fmtLocal(ts = new Date()) {
+    const d = ts instanceof Date ? ts : new Date(ts);
+    const pad = (n) => String(n).padStart(2, "0");
+    return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}, ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
   }
 
-  // Lambda might return { slots: [...] } or just [...]
-  const data = await res.json();
-  const arr = Array.isArray(data) ? data : (data.slots ?? data.items ?? []);
-  return arr.map(normalizeSlot);
-}
-
-async function apiBookAppointment(payload) {
-  const url = `${apiBaseUrl}/book-appointment`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
-  });
-
-  if (!res.ok) {
-    const t = await res.text().catch(() => "");
-    throw new Error(`POST /book-appointment failed (${res.status}). ${t}`);
+  function toast(title, detail) {
+    const node = document.createElement("div");
+    node.className = "toast";
+    node.innerHTML = `<div>${escapeHtml(title)}</div>${detail ? `<div class="muted">${escapeHtml(detail)}</div>` : ""}`;
+    els.toastHost.appendChild(node);
+    setTimeout(() => node.remove(), 4200);
   }
-  return await res.json().catch(() => ({}));
-}
 
-// ---------- UI State ----------
-let allSlots = [];
-let selected = null;
+  function escapeHtml(s) {
+    return String(s)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
+  }
 
-function renderSlots() {
-  const wrap = $("slotsWrap");
-  wrap.innerHTML = "";
+  function saveLocal(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+  }
+  function loadLocal(key, fallback) {
+    try {
+      const raw = localStorage.getItem(key);
+      if (!raw) return fallback;
+      return JSON.parse(raw);
+    } catch { return fallback; }
+  }
 
-  const dateVal = $("dateFilter").value;
-  const searchVal = $("searchFilter").value.trim();
+  function isValidEmail(email) {
+    // Simple but practical email check for a student project UI
+    return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(email).trim());
+  }
 
-  const filtered = allSlots
-    .filter(s => matchesFilters(s, dateVal, searchVal))
-    // show AVAILABLE first, then by date/time
-    .sort((a, b) => {
-      const rank = (x) => (String(x.status).toUpperCase() === "AVAILABLE" ? 0 : 1);
-      const r = rank(a) - rank(b);
-      if (r !== 0) return r;
-      const ad = `${a.appointmentDate} ${a.appointmentTime}`;
-      const bd = `${b.appointmentDate} ${b.appointmentTime}`;
-      return ad.localeCompare(bd);
+  function getPatient() {
+    return {
+      name: (els.patientName.value || "").trim(),
+      email: (els.patientEmail.value || "").trim(),
+    };
+  }
+
+  function updatePatientHint() {
+    const { name, email } = getPatient();
+    if (!name && !email) {
+      els.patientHint.textContent = "";
+      return;
+    }
+    if (!name) {
+      els.patientHint.textContent = "Please enter your full name to book an appointment.";
+      return;
+    }
+    if (!isValidEmail(email)) {
+      els.patientHint.textContent = "Please enter a valid email address to book an appointment.";
+      return;
+    }
+    els.patientHint.textContent = "";
+  }
+
+  function canBook() {
+    const { name, email } = getPatient();
+    return Boolean(name) && isValidEmail(email);
+  }
+
+  function setStatus(msg) {
+    els.statusText.textContent = msg;
+  }
+
+  /** ---------- state ---------- */
+  const state = {
+    allSlots: [],
+    xCache: null,
+    debugOpen: false,
+  };
+
+  /** ---------- debug panel ---------- */
+  function setDebugPanel(open) {
+    state.debugOpen = open;
+    els.debugPanel.hidden = !open;
+    els.debugBtn.setAttribute("aria-expanded", open ? "true" : "false");
+    if (!open) {
+      // keep cache status hidden if toggle is off
+      if (!els.debugShowCache.checked) els.cacheStatus.hidden = true;
+    } else {
+      if (els.debugShowCache.checked) els.cacheStatus.hidden = false;
+    }
+  }
+
+  function updateCacheUI() {
+    // Cache UI should ONLY appear when "Show cache status" is enabled.
+    if (els.debugShowCache.checked) {
+      els.cacheStatus.hidden = false;
+      els.cacheStatus.textContent = `Cache: ${state.xCache || "—"}`;
+    } else {
+      els.cacheStatus.hidden = true;
+    }
+  }
+
+  /** ---------- rendering ---------- */
+  function uniqueTimes(slots) {
+    const set = new Set();
+    for (const s of slots) if (s.appointmentTime) set.add(s.appointmentTime);
+    return Array.from(set).sort();
+  }
+
+  function renderTimeOptions(slotsForTime) {
+    const current = els.timeFilter.value;
+    const times = uniqueTimes(slotsForTime);
+
+    // Keep first option, rebuild rest
+    els.timeFilter.innerHTML = `<option value="">Any time</option>` +
+      times.map((t) => `<option value="${escapeHtml(t)}">${escapeHtml(t)}</option>`).join("");
+
+    // restore current if possible
+    if (current && times.includes(current)) els.timeFilter.value = current;
+    else els.timeFilter.value = "";
+  }
+
+  function applyFilters(slots) {
+    const date = els.dateFilter.value; // yyyy-mm-dd
+    const time = els.timeFilter.value;
+
+    return slots.filter((s) => {
+      if (date && s.appointmentDate !== date) return false;
+      if (time && s.appointmentTime !== time) return false;
+      return true;
     });
-
-  if (filtered.length === 0) {
-    const empty = document.createElement("div");
-    empty.className = "status muted";
-    empty.textContent = "No slots match your filter.";
-    wrap.appendChild(empty);
-    return;
   }
 
-  for (const slot of filtered) {
-    const row = document.createElement("div");
-    row.className = "slot";
+  function renderSlots() {
+    const filtered = applyFilters(state.allSlots);
+    els.slotsCount.textContent = `Showing ${filtered.length} slot${filtered.length === 1 ? "" : "s"}`;
 
-    const meta = document.createElement("div");
-    meta.className = "meta";
-
-    const date = document.createElement("div");
-    date.className = "date";
-    date.textContent = `${safeText(slot.appointmentDate)} ${safeText(slot.appointmentTime)}`;
-
-    const id = document.createElement("div");
-    id.className = "id";
-    id.textContent = `ID: ${safeText(slot.appointmentId)}`;
-
-    meta.appendChild(date);
-    meta.appendChild(id);
-
-    const right = document.createElement("div");
-    right.style.display = "flex";
-    right.style.gap = "10px";
-    right.style.alignItems = "center";
-
-    const badge = document.createElement("span");
-    badge.className = `badge ${badgeClass(slot.status)}`;
-    badge.textContent = safeText(slot.status).toUpperCase();
-
-    const btn = document.createElement("button");
-    btn.className = "btn secondary";
-    btn.textContent = "Select";
-    btn.disabled = String(slot.status).toUpperCase() !== "AVAILABLE";
-    btn.addEventListener("click", () => selectSlot(slot));
-
-    right.appendChild(badge);
-    right.appendChild(btn);
-
-    row.appendChild(meta);
-    row.appendChild(right);
-
-    wrap.appendChild(row);
-  }
-}
-
-function selectSlot(slot) {
-  selected = slot;
-  $("selectedSlot").value = `${slot.appointmentDate} ${slot.appointmentTime} (ID: ${slot.appointmentId})`;
-  $("bookBtn").disabled = false;
-  setStatus($("formMsg"), "muted", "Ready to submit booking.");
-}
-
-// ---------- Actions ----------
-async function loadSlots() {
-  const bar = $("statusBar");
-  setStatus(bar, "muted", "Loading slots…");
-
-  try {
-    if (!apiBaseUrl || apiBaseUrl.includes("REPLACE_WITH")) {
-      throw new Error("API base URL not set. Edit config.js and set apiBaseUrl.");
+    if (!state.allSlots.length) {
+      els.slots.innerHTML = "";
+      setStatus("No slots returned from the API.");
+      return;
     }
 
-    allSlots = await apiGetSlots();
+    if (!filtered.length) {
+      els.slots.innerHTML = "";
+      setStatus("No slots match the selected filters.");
+      return;
+    }
 
-    // Optional: if your lambda returns all slots, we can still show only AVAILABLE as selectable
-    const availableCount = allSlots.filter(s => String(s.status).toUpperCase() === "AVAILABLE").length;
+    setStatus("Loaded.");
+    const showIds = Boolean(els.debugShowIds.checked);
+    const bookEnabled = canBook();
 
-    setStatus(bar, "ok", `Loaded ${allSlots.length} slots (${availableCount} available).`);
-    renderSlots();
-  } catch (err) {
-    console.error(err);
-    setStatus(bar, "err", err.message || "Failed to load slots.");
-    allSlots = [];
+    els.slots.innerHTML = filtered.map((s) => {
+      const dt = `${s.appointmentDate} • ${s.appointmentTime}`;
+      const idLine = showIds ? `<div class="slot-meta"><div>appointmentId</div><code>${escapeHtml(s.appointmentId || "")}</code></div>` : "";
+      return `
+        <div class="slot">
+          <div class="slot-top">
+            <div>
+              <div class="slot-dt">${escapeHtml(dt)}</div>
+              <div class="slot-meta">AVAILABLE</div>
+            </div>
+            <div class="badge">Available</div>
+          </div>
+
+          ${idLine}
+
+          <button class="btn btn-primary" data-appointment-id="${escapeHtml(s.appointmentId || "")}" ${bookEnabled ? "" : "disabled"}>
+            Book
+          </button>
+        </div>
+      `;
+    }).join("");
+
+    // attach listeners
+    els.slots.querySelectorAll("button[data-appointment-id]").forEach((btn) => {
+      btn.addEventListener("click", async () => {
+        const apptId = btn.getAttribute("data-appointment-id");
+        if (!apptId) return;
+
+        if (!canBook()) {
+          toast("Missing patient details", "Please enter a valid name and email.");
+          updatePatientHint();
+          return;
+        }
+
+        btn.disabled = true;
+        btn.textContent = "Booking…";
+        try {
+          await bookAppointment(apptId);
+          toast("Booking submitted", "Refreshing available slots…");
+          await fetchSlots();
+        } catch (err) {
+          toast("Booking failed", err?.message || "Unexpected error");
+          btn.disabled = false;
+          btn.textContent = "Book";
+        }
+      });
+    });
+  }
+
+  /** ---------- network ---------- */
+  async function fetchSlots() {
+    if (!apiBaseUrl) {
+      setStatus("Missing API base URL. Please update config.js.");
+      return;
+    }
+
+    setStatus("Loading…");
+    els.slots.innerHTML = "";
+
+    const res = await fetch(endpoints.slots, {
+      method: "GET",
+      cache: "no-store",
+      headers: { "Accept": "application/json" },
+    });
+
+    // capture cache header (case-insensitive in browsers via get)
+    state.xCache = res.headers.get("x-cache") || res.headers.get("X-Cache");
+    updateCacheUI();
+
+    if (els.debugShowCache.checked) {
+      toast("Slots refreshed", `Cache: ${state.xCache || "—"}`);
+    }
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`Slots API error: ${res.status} ${res.statusText}${text ? " - " + text : ""}`);
+    }
+
+    const data = await res.json();
+    state.allSlots = Array.isArray(data) ? data : [];
+
+    // Derive env pill from API base URL
+    els.envPill.textContent = apiBaseUrl.includes("/prod") ? "PROD" : "DEV";
+
+    els.lastUpdated.textContent = `Last updated: ${fmtLocal(new Date())}`;
+
+    // Time dropdown should reflect the currently selected date (if any)
+    const date = els.dateFilter.value;
+    const baseForTimes = date ? state.allSlots.filter(s => s.appointmentDate === date) : state.allSlots;
+    renderTimeOptions(baseForTimes);
+
     renderSlots();
   }
+
+  async function bookAppointment(appointmentId) {
+    const { name, email } = getPatient();
+
+    const payload = {
+      appointmentId,
+      patientName: name,
+      patientEmail: email,
+    };
+
+    const res = await fetch(endpoints.book, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Accept": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      throw new Error(`Book API error: ${res.status} ${res.statusText}${text ? " - " + text : ""}`);
+    }
+
+    // Some setups return no body; treat ok as success
+    await res.text().catch(() => "");
+  }
+
+  /** ---------- events ---------- */
+  function onDateChange() {
+    // rebuild time options based on date
+    const date = els.dateFilter.value;
+    const base = date ? state.allSlots.filter(s => s.appointmentDate === date) : state.allSlots;
+    renderTimeOptions(base);
+    renderSlots();
+  }
+
+  function onTimeChange() {
+    renderSlots();
+  }
+
+async function onResetFilters() {
+  els.resetFiltersBtn.disabled = true;
+
+  els.dateFilter.value = "";
+  els.timeFilter.value = "";
+
+  await fetchSlots(); // ONE refresh, includes toast + cache info
+
+  els.resetFiltersBtn.disabled = false;
 }
 
-async function submitBooking(e) {
-  e.preventDefault();
-
-  const msg = $("formMsg");
-  if (!selected) {
-    setStatus(msg, "warn", "Please select an AVAILABLE slot first.");
-    return;
+  function persistPatient() {
+    const { name, email } = getPatient();
+    saveLocal("patientDetails", { name, email });
+    updatePatientHint();
+    // refresh button states
+    els.slots.querySelectorAll("button[data-appointment-id]").forEach((btn) => {
+      btn.disabled = !canBook();
+    });
   }
 
-  const patientName = $("patientName").value.trim();
-  const patientEmail = $("patientEmail").value.trim();
-  const notes = $("notes").value.trim();
-
-  if (!patientName || !patientEmail) {
-    setStatus(msg, "warn", "Name and Email are required.");
-    return;
+  function persistDebug() {
+    saveLocal("debug", {
+      showIds: !!els.debugShowIds.checked,
+      showCache: !!els.debugShowCache.checked,
+    });
+    updateCacheUI();
+    renderSlots();
   }
 
-  // Payload aligned with report’s DynamoDB attributes:
-  // - appointmentId identifies the slot
-  // - patientEmail is stored later upon booking
-  // - status becomes PENDING in the backend
-  const payload = {
-    appointmentId: selected.appointmentId,
-    appointmentDate: selected.appointmentDate,
-    appointmentTime: selected.appointmentTime,
-    patientName,
-    patientEmail,
-    notes
-  };
-
-  setStatus(msg, "muted", "Submitting booking…");
-  $("bookBtn").disabled = true;
-
-  try {
-    const result = await apiBookAppointment(payload);
-
-    // Best effort display based on possible responses
-    const bookingStatus = (result.status || result.bookingStatus || "PENDING").toUpperCase();
-    const message =
-      result.message ||
-      `Booking submitted. Current status: ${bookingStatus}.`;
-
-    setStatus(msg, "ok", message);
-
-    // Refresh slots after booking (backend should mark slot as PENDING / not AVAILABLE)
-    selected = null;
-    $("selectedSlot").value = "";
-    $("bookingForm").reset();
-    $("bookBtn").disabled = true;
-
-    await loadSlots();
-  } catch (err) {
-    console.error(err);
-    setStatus(msg, "err", err.message || "Booking failed.");
-    $("bookBtn").disabled = false;
+  function attachGlobalClickClose() {
+    document.addEventListener("click", (e) => {
+      if (!state.debugOpen) return;
+      const target = e.target;
+      const inside = els.debugPanel.contains(target) || els.debugBtn.contains(target);
+      if (!inside) setDebugPanel(false);
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") setDebugPanel(false);
+    });
   }
-}
 
-// ---------- Wire up ----------
-window.addEventListener("DOMContentLoaded", () => {
-  $("refreshBtn").addEventListener("click", loadSlots);
-  $("dateFilter").addEventListener("input", renderSlots);
-  $("searchFilter").addEventListener("input", renderSlots);
-  $("bookingForm").addEventListener("submit", submitBooking);
+  /** ---------- init ---------- */
+  function init() {
+    // restore patient
+    const saved = loadLocal("patientDetails", null);
+    if (saved?.name) els.patientName.value = saved.name;
+    if (saved?.email) els.patientEmail.value = saved.email;
 
-  loadSlots();
-});
+    // restore debug
+    const debug = loadLocal("debug", { showIds: false, showCache: false });
+    els.debugShowIds.checked = !!debug.showIds;
+    els.debugShowCache.checked = !!debug.showCache;
+
+    updatePatientHint();
+    updateCacheUI();
+
+    els.refreshBtn.addEventListener("click", () => fetchSlots().catch((e) => toast("Refresh failed", e.message)));
+    els.dateFilter.addEventListener("change", onDateChange);
+    els.timeFilter.addEventListener("change", onTimeChange);
+    els.resetFiltersBtn.addEventListener("click", onResetFilters);
+
+    els.patientName.addEventListener("input", persistPatient);
+    els.patientEmail.addEventListener("input", persistPatient);
+
+    els.debugBtn.addEventListener("click", () => setDebugPanel(!state.debugOpen));
+    els.debugShowIds.addEventListener("change", persistDebug);
+    els.debugShowCache.addEventListener("change", persistDebug);
+
+    attachGlobalClickClose();
+
+    fetchSlots().catch((e) => {
+      setStatus("Failed to load slots.");
+      toast("Slots load failed", e.message);
+    });
+  }
+
+  init();
+})();

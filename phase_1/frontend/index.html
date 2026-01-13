@@ -1,94 +1,128 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Patient Appointment Booking</title>
-  <link rel="stylesheet" href="./styles.css" />
+  <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <header class="container">
-    <h1>Appointment Booking</h1>
-    <p class="sub">View available appointment slots and book an appointment.</p>
-  </header>
-
-  <main class="container grid">
-    <!-- LEFT: Slots -->
-    <section class="card">
-      <div class="card-head">
-        <h2>Available Slots</h2>
-        <div class="actions">
-          <button id="refreshBtn" class="btn secondary">Refresh</button>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-icon" aria-hidden="true">+</div>
+        <div class="brand-text">
+          <div class="brand-title">Patient Appointment Booking</div>
+          <div class="brand-subtitle">View available appointment slots and submit a booking request.</div>
         </div>
       </div>
 
-      <div id="statusBar" class="status muted">Loading slots…</div>
+      <div class="topbar-actions">
+        <span class="pill" id="envPill" title="Environment">PROD</span>
+        <button class="btn btn-ghost" id="refreshBtn" type="button">Refresh</button>
+      </div>
+    </header>
 
-      <div class="filters">
-        <label class="field">
-          <span>Date filter (optional)</span>
-          <input id="dateFilter" type="date" />
-        </label>
-        <label class="field">
-          <span>Search (optional)</span>
-          <input id="searchFilter" type="text" placeholder="e.g., 09:00 or 2026-01-20" />
-        </label>
+    <main class="content">
+      <section class="card">
+        <div class="card-header">
+          <h2>Patient details</h2>
+          <p class="muted">These details are sent to the booking API when you confirm an appointment.</p>
+        </div>
+
+        <div class="form-grid">
+          <label class="field">
+            <span>Full name</span>
+            <input id="patientName" type="text" placeholder="e.g., John Doe" autocomplete="name" />
+          </label>
+
+          <label class="field">
+            <span>Email</span>
+            <input id="patientEmail" type="email" placeholder="e.g., test@example.com" autocomplete="email" />
+          </label>
+        </div>
+
+        <div class="form-hint muted" id="patientHint" aria-live="polite"></div>
+      </section>
+
+      <section class="card">
+        <div class="card-header card-header-row">
+          <div>
+            <h2>Available slots</h2>
+            <p class="muted">Filter by date and time, then click <b>Book</b>.</p>
+          </div>
+          <div class="meta">
+            <div class="muted" id="slotsCount">Showing 0 slots</div>
+            <button class="btn btn-ghost" id="resetFiltersBtn" type="button">Reset filters</button>
+          </div>
+        </div>
+
+        <div class="filters">
+          <label class="field">
+            <span>Date</span>
+            <input id="dateFilter" type="date" />
+          </label>
+
+          <label class="field">
+            <span>Time</span>
+            <div class="select-wrap">
+              <select id="timeFilter">
+                <option value="">Any time</option>
+              </select>
+            </div>
+          </label>
+
+          <div class="filters-meta muted">
+            <span id="lastUpdated">Last updated: —</span>
+          </div>
+        </div>
+
+        <div class="divider"></div>
+
+        <div class="status" id="statusText" aria-live="polite">Loading…</div>
+
+        <div class="slots-scroll" aria-label="Scrollable list of available appointment slots">
+          <div class="slots" id="slots"></div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="footer-left muted">
+        <span class="kbd">Tip</span> Fill in your details once — your browser will remember them for this site.
       </div>
 
-      <div id="slotsWrap" class="slots"></div>
-    </section>
+      <div class="footer-right">
+        <button class="btn btn-ghost" id="debugBtn" type="button" aria-expanded="false" aria-controls="debugPanel">Debug</button>
 
-    <!-- RIGHT: Booking form -->
-    <section class="card">
-      <div class="card-head">
-        <h2>Book Selected Slot</h2>
+        <div class="debug-panel" id="debugPanel" hidden>
+          <div class="debug-row">
+            <label class="checkbox">
+              <input id="debugShowIds" type="checkbox" />
+              <span>Show internal IDs</span>
+            </label>
+          </div>
+
+          <div class="debug-row">
+            <label class="checkbox">
+              <input id="debugShowCache" type="checkbox" />
+              <span>Show cache status</span>
+            </label>
+          </div>
+
+          <div class="debug-cache muted" id="cacheStatus" hidden>Cache: —</div>
+
+          <div class="debug-note muted">
+            For the assignment report: screenshots should typically have debug off.
+          </div>
+        </div>
       </div>
+    </footer>
+  </div>
 
-      <form id="bookingForm" class="form">
-        <label class="field">
-          <span>Selected Slot</span>
-          <input id="selectedSlot" type="text" placeholder="Select a slot on the left" readonly />
-        </label>
+  <div class="toast-host" id="toastHost" aria-live="polite" aria-relevant="additions"></div>
 
-        <label class="field">
-          <span>Your Name</span>
-          <input id="patientName" type="text" placeholder="e.g., Ryota Suzuki" required />
-        </label>
-
-        <label class="field">
-          <span>Email</span>
-          <input id="patientEmail" type="email" placeholder="e.g., you@example.com" required />
-        </label>
-
-        <label class="field">
-          <span>Notes (optional)</span>
-          <textarea id="notes" rows="3" placeholder="Any note for the clinic"></textarea>
-        </label>
-
-        <button id="bookBtn" class="btn primary" type="submit" disabled>
-          Book Appointment
-        </button>
-
-        <div id="formMsg" class="status muted"></div>
-      </form>
-
-      <hr class="sep"/>
-
-      <div class="info">
-        <h3>What happens next?</h3>
-        <ul>
-          <li>Your booking is submitted with status <b>PENDING</b>.</li>
-          <li>Admin later accepts or declines (your backend workflow handles that).</li>
-        </ul>
-      </div>
-    </section>
-  </main>
-
-  <footer class="container foot">
-    <small>Patient Booking UI (S3 Static Website) · Calls API Gateway endpoints</small>
-  </footer>
-
-  <script src="./config.js"></script>
-  <script src="./app.js"></script>
+  <script src="config.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>
