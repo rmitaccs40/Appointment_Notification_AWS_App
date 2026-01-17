@@ -45,7 +45,7 @@
             
             cognitoUser.authenticateUser(authenticationDetails, {
                 onSuccess: (result) => {
-                    localStorage.setItem('token', result.getAccessToken().getJwtToken());
+                    localStorage.setItem('token', result.getIdToken().getJwtToken());
                     window.location.href = '/';
                 },
                 onFailure: (err) => {
