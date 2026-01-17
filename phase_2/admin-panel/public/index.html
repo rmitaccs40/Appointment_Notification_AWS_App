@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Admin Panel</title>
+    <style>
+        body { font-family: Arial; padding: 20px; }
+        button { padding: 10px 20px; margin: 10px 5px; cursor: pointer; }
+        table { width: 100%; border-collapse: collapse; margin-top: 20px; }
+        th, td { border: 1px solid #ddd; padding: 12px; text-align: left; }
+        th { background: #007bff; color: white; }
+        .accept { background: green; color: white; }
+        .decline { background: red; color: white; }
+    </style>
+</head>
+<body>
+    <h1>Admin Dashboard</h1>
+    <button onclick="logout()">Logout</button>
+    <button onclick="loadAppointments()">Refresh</button>
+    <div id="appointments"></div>
+    <script>
+        function getToken() { return localStorage.getItem('token'); }
+        
+        window.addEventListener('DOMContentLoaded', () => {
+            if (!getToken()) window.location.href = '/login.html';
+            else loadAppointments();
+        });
+        
+        function logout() {
+            localStorage.removeItem('token');
+            window.location.href = '/login.html';
+        }
+        
+        function loadAppointments() {
+            fetch('/api/appointments', {
+                headers: { 'Authorization': `Bearer ${getToken()}` }
+            })
+            .then(r => r.status === 401 ? (logout(), null) : r.json())
+            .then(data => {
+                if (!data) return;
+                let html = '<table><tr><th>ID</th><th>Patient</th><th>Date</th><th>Time</th><th>Status</th><th>Actions</th></tr>';
+                data.appointments.forEach(apt => {
+                    html += `<tr>
+                        <td>${apt.appointmentId}</td>
+                        <td>${apt.patientName || 'N/A'}</td>
+                        <td>${apt.appointmentDate}</td>
+                        <td>${apt.appointmentTime}</td>
+                        <td>${apt.status}</td>
+                        <td>`;
+                    if (apt.status === 'PENDING') {
+                        html += `<button class="accept" onclick="updateStatus('${apt.appointmentId}', 'ACCEPTED')">Accept</button>
+                                 <button class="decline" onclick="updateStatus('${apt.appointmentId}', 'DECLINED')">Decline</button>`;
+                    } else html += apt.status;
+                    html += `</td></tr>`;
+                });
+                html += '</table>';
+                document.getElementById('appointments').innerHTML = html;
+            });
+        }
+        
+        function updateStatus(id, status) {
+            fetch('/api/appointments/' + id, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${getToken()}` },
+                body: JSON.stringify({status})
+            })
+            .then(r => r.status === 401 ? logout() : r.json())
+            .then(data => {
+                if (data) { alert('Updated to ' + status); loadAppointments(); }
+            });
+        }
+    </script>
+</body>
+</html>
