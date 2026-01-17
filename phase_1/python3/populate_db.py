@@ -1,40 +1,45 @@
-import os
 import boto3
-import uuid
 from datetime import datetime, timedelta
 
-REGION = os.getenv("AWS_REGION", "us-east-1")
-TABLE_NAME = os.getenv("TABLE_NAME", "Appointments")
+dynamodb = boto3.client('dynamodb', region_name='us-east-1')
 
-dynamodb = boto3.resource("dynamodb", region_name=REGION)
-table = dynamodb.Table(TABLE_NAME)
-
-START_DATE = datetime(2026, 1, 10)
-END_DATE   = datetime(2026, 1, 31)  # inclusive
-
-SLOTS_PER_DAY = [
-    "09:00", "10:00", "11:00",
-    "13:00", "14:00", "15:00",
-    "16:00", "17:00", "18:00"
-]
-
-def daterange(start: datetime, end: datetime):
-    d = start
-    while d <= end:
-        yield d
-        d += timedelta(days=1)
-
-count = 0
-with table.batch_writer() as batch:
-    for date in daterange(START_DATE, END_DATE):
+def populate_available_slots():
+    time_slots = [
+        "09:00 AM", "10:00 AM", "11:00 AM", 
+        "12:00 PM", "01:00 PM", "02:00 PM", 
+        "03:00 PM", "04:00 PM", "05:00 PM"
+    ]
+    
+    slots_created = 0
+    
+    for day_offset in range(1, 14):
+        date = datetime.now() + timedelta(days=day_offset)
+        
+        if date.weekday() >= 5:
+            continue
+        
         date_str = date.strftime("%Y-%m-%d")
-        for t in SLOTS_PER_DAY:
-            batch.put_item(Item={
-                "appointmentId": str(uuid.uuid4()),
-                "appointmentDate": date_str,
-                "appointmentTime": t,
-                "status": "AVAILABLE"
-            })
-            count += 1
+        
+        for time_slot in time_slots:
+            slot_id = f"slot-{date_str}-{time_slot.replace(':', '').replace(' ', '')}"
+            
+            try:
+                dynamodb.put_item(
+                    TableName='Appointments',
+                    Item={
+                        'appointmentId': {'S': slot_id},
+                        'appointmentDate': {'S': date_str},
+                        'appointmentTime': {'S': time_slot},
+                        'status': {'S': 'AVAILABLE'}
+                    },
+                    ConditionExpression='attribute_not_exists(appointmentId)'
+                )
+                slots_created += 1
+                print(f"Created: {date_str} at {time_slot}")
+            except:
+                pass
+    
+    print(f"\nTotal slots created: {slots_created}")
 
-print(f"Inserted {count} appointment slots.")
+if __name__ == "__main__":
+    populate_available_slots()
