@@ -3,9 +3,9 @@ name: Deploy Admin Panel to ECS
 on:
   push:
     branches:
-      - main  # Trigger on push to main branch
+      - main
     paths:
-      - 'phase_2/admin-panel/public/**'  # Only trigger if the index.html or login.html files change
+      - 'phase_2/admin-panel/public/**'
 
 env:
   AWS_REGION: us-east-1
@@ -57,21 +57,75 @@ jobs:
         docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
         docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
 
-    # Step 6: Update ECS service
+    # Step 6: Register new task definition with environment variables
+    - name: Register task definition
+      env:
+        ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+      run: |
+        cat > task-definition.json << 'EOF'
+        {
+          "family": "admin-panel-task",
+          "networkMode": "awsvpc",
+          "requiresCompatibilities": ["FARGATE"],
+          "cpu": "256",
+          "memory": "512",
+          "executionRoleArn": "arn:aws:iam::796645842706:role/LabRole",
+          "taskRoleArn": "arn:aws:iam::796645842706:role/LabRole",
+          "containerDefinitions": [
+            {
+              "name": "admin-panel",
+              "image": "IMAGE_PLACEHOLDER",
+              "cpu": 0,
+              "portMappings": [
+                {
+                  "containerPort": 3000,
+                  "hostPort": 3000,
+                  "protocol": "tcp"
+                }
+              ],
+              "essential": true,
+              "environment": [
+                {
+                  "name": "USER_POOL_ID",
+                  "value": "us-east-1_UsstBMXJz"
+                },
+                {
+                  "name": "CLIENT_ID",
+                  "value": "20b2crmljtlpj4h7mljlbueseu"
+                }
+              ]
+            }
+          ]
+        }
+        EOF
+        
+        # Replace image placeholder with actual ECR image
+        sed -i "s|IMAGE_PLACEHOLDER|$ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest|g" task-definition.json
+        
+        # Register the new task definition
+        aws ecs register-task-definition \
+          --cli-input-json file://task-definition.json \
+          --region ${{ env.AWS_REGION }}
+
+    # Step 7: Get current desired count and update ECS service
     - name: Update ECS service
       run: |
+        # Get current desired count
+        DESIRED_COUNT=$(aws ecs describe-services \
+          --cluster ${{ env.ECS_CLUSTER }} \
+          --services ${{ env.ECS_SERVICE }} \
+          --query 'services[0].desiredCount' \
+          --output text \
+          --region ${{ env.AWS_REGION }})
+        
+        echo "Current desired count: $DESIRED_COUNT"
+        
+        # Update service with current desired count (preserves whatever count is set)
         aws ecs update-service \
           --cluster ${{ env.ECS_CLUSTER }} \
           --service ${{ env.ECS_SERVICE }} \
+          --desired-count $DESIRED_COUNT \
           --force-new-deployment \
-          --region ${{ env.AWS_REGION }}
-
-    # Step 7: Wait for deployment to complete
-    - name: Wait for service stability
-      run: |
-        aws ecs wait services-stable \
-          --cluster ${{ env.ECS_CLUSTER }} \
-          --services ${{ env.ECS_SERVICE }} \
           --region ${{ env.AWS_REGION }}
 
     - name: Deployment complete
