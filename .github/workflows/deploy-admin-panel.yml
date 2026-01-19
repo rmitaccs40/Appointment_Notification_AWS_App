@@ -40,7 +40,7 @@ jobs:
 
     # Step 4: Build Docker image
     - name: Build Docker image
-      working-directory: ./phase_2
+      working-directory: ./phase_2/admin-panel
       env:
         ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         IMAGE_TAG: ${{ github.sha }}
