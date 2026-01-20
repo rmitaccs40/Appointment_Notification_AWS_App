@@ -37,6 +37,53 @@
   
 
   /** ---------- helpers ---------- */
+  // Performance optimizations: cache current time and shared parsing
+  let currentTime = new Date();
+  let lastTimeUpdate = Date.now();
+  let filteredSlotsCache = null;
+  let lastFilterState = null;
+  const activeToasts = new Set();
+  let globalListenersAttached = false;
+
+  function getCurrentTime() {
+    const now = Date.now();
+    if (now - lastTimeUpdate > 1000) { // Update every second
+      currentTime = new Date(now);
+      lastTimeUpdate = now;
+    }
+    return currentTime;
+  }
+
+  function parseTimeString(timeStr) {
+    const match = String(timeStr).trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+    if (!match) return null;
+    
+    let hours = parseInt(match[1], 10);
+    const minutes = parseInt(match[2], 10);
+    const ampm = match[3].toUpperCase();
+    
+    if (ampm === "AM") {
+      if (hours === 12) hours = 0;
+    } else {
+      if (hours !== 12) hours += 12;
+    }
+    
+    return { hours, minutes };
+  }
+
+  function debounce(func, delay) {
+    let timeoutId;
+    return function(...args) {
+      clearTimeout(timeoutId);
+      timeoutId = setTimeout(() => func.apply(this, args), delay);
+    };
+  }
+
+  function clearFilterCache() {
+    filteredSlotsCache = null;
+    lastFilterState = null;
+  }
+
   function fmtLocal(ts = new Date()) {
     const d = ts instanceof Date ? ts : new Date(ts);
     const pad = (n) => String(n).padStart(2, "0");
@@ -56,12 +103,58 @@
     return dateStr < todayISO();
   }
 
+  function isAppointmentInPast(dateStr, timeStr) {
+    if (!dateStr || !timeStr) return false;
+    
+    const parsed = parseTimeString(timeStr);
+    if (!parsed) return false;
+    
+    // Parse date string manually to avoid UTC interpretation issues
+    const dateParts = dateStr.split('-');
+    if (dateParts.length !== 3) return false;
+    
+    const year = parseInt(dateParts[0], 10);
+    const month = parseInt(dateParts[1], 10) - 1; // month is 0-indexed
+    const day = parseInt(dateParts[2], 10);
+    
+    // Create appointment date object in LOCAL time
+    const appointmentDateTime = new Date(year, month, day, parsed.hours, parsed.minutes, 0, 0);
+    const now = getCurrentTime();
+    
+    // Inclusive comparison: appointments at current time are considered past
+    const isPast = appointmentDateTime.getTime() <= now.getTime();
+    
+    // Debug logging when debug panel is open
+    if (state.debugOpen) {
+      console.log(`[Debug] Appointment ${dateStr} ${timeStr}:`, {
+        localNow: now.toISOString(),
+        appointmentLocal: appointmentDateTime.toISOString(),
+        filteredOut: isPast
+      });
+    }
+    
+    return isPast;
+  }
+
   function toast(title, detail) {
     const node = document.createElement("div");
     node.className = "toast";
     node.innerHTML = `<div>${escapeHtml(title)}</div>${detail ? `<div class="muted">${escapeHtml(detail)}</div>` : ""}`;
+    
     els.toastHost.appendChild(node);
-    setTimeout(() => node.remove(), 4200);
+    activeToasts.add(node);
+    
+    const cleanup = () => {
+      if (activeToasts.has(node)) {
+        activeToasts.delete(node);
+        node.remove();
+      }
+    };
+    
+    setTimeout(cleanup, 4200);
+    
+    // Allow manual dismissal
+    node.addEventListener('click', cleanup);
   }
 
   function escapeHtml(s) {
@@ -166,20 +259,8 @@ const state = {
   /** ---------- rendering ---------- */
   function timeToMinutes(t) {
     // expects formats like "09:00 AM", "12:00 PM"
-    const m = String(t).trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
-    if (!m) return Number.POSITIVE_INFINITY; // push unknown formats to the end
-
-    let hh = parseInt(m[1], 10);
-    const mm = parseInt(m[2], 10);
-    const ampm = m[3].toUpperCase();
-
-    // 12 AM = 0, 12 PM = 12
-    if (ampm === "AM") {
-      if (hh === 12) hh = 0;
-    } else { // PM
-      if (hh !== 12) hh += 12;
-    }
-    return hh * 60 + mm;
+    const parsed = parseTimeString(t);
+    return parsed ? parsed.hours * 60 + parsed.minutes : Number.POSITIVE_INFINITY;
   }
 
   function uniqueTimes(slots) {
@@ -205,14 +286,23 @@ const state = {
   function applyFilters(slots) {
     const date = els.dateFilter.value; // yyyy-mm-dd
     const time = els.timeFilter.value;
-
-    return slots.filter((s) => {
-      // Always filter out past dates
-      if (isDateInPast(s.appointmentDate)) return false;
+    const currentFilterState = `${date}|${time}|${slots.length}|${getCurrentTime().getTime()}`;
+    
+    // Return cached result if filters haven't changed
+    if (filteredSlotsCache && lastFilterState === currentFilterState) {
+      return filteredSlotsCache;
+    }
+    
+    filteredSlotsCache = slots.filter((s) => {
+      // Always filter out past appointments (date + time)
+      if (isAppointmentInPast(s.appointmentDate, s.appointmentTime)) return false;
       if (date && s.appointmentDate !== date) return false;
       if (time && s.appointmentTime !== time) return false;
       return true;
     });
+    
+    lastFilterState = currentFilterState;
+    return filteredSlotsCache;
   }
 
   function renderSlots() {
@@ -285,6 +375,19 @@ const state = {
   }
 
   /** ---------- network ---------- */
+  async function safeFetch(url, options, context = 'API call') {
+    try {
+      const response = await fetch(url, options);
+      return response;
+    } catch (error) {
+      console.error(`${context} failed:`, error);
+      if (error.name === 'TypeError' && error.message.includes('fetch')) {
+        throw new Error('Network error. Please check your connection.');
+      }
+      throw error;
+    }
+  }
+
 async function fetchSlots() {
   if (state.loading) return;
 
@@ -298,11 +401,13 @@ async function fetchSlots() {
     setStatus("Loading…");
     els.slots.innerHTML = "";
 
-    const res = await fetch(endpoints.slots, {
+    const res = await safeFetch(endpoints.slots, {
       method: "GET",
       cache: "no-store",
       headers: { "Accept": "application/json" },
-    });
+    }, 'Fetch slots');
+
+    clearFilterCache(); // Clear cache when new data arrives
 
     state.xCache = res.headers.get("x-cache") || res.headers.get("X-Cache");
     // fallback so UI is clearer when CORS expose is missing:
@@ -350,11 +455,11 @@ async function fetchSlots() {
       patientEmail: email,
     };
 
-    const res = await fetch(endpoints.book, {
+    const res = await safeFetch(endpoints.book, {
       method: "POST",
       headers: { "Content-Type": "application/json", "Accept": "application/json" },
       body: JSON.stringify(payload),
-    });
+    }, 'Book appointment');
 
     if (!res.ok) {
       const text = await res.text().catch(() => "");
@@ -370,11 +475,13 @@ async function fetchSlots() {
     // rebuild time options based on date
     const date = els.dateFilter.value;
     const base = date ? state.allSlots.filter(s => s.appointmentDate === date) : state.allSlots;
+    clearFilterCache(); // Clear cache when date filter changes
     renderTimeOptions(base);
     renderSlots();
   }
 
   function onTimeChange() {
+    clearFilterCache(); // Clear cache when time filter changes
     renderSlots();
   }
 
@@ -399,25 +506,35 @@ async function fetchSlots() {
     });
   }
 
+  const debouncedPersistPatient = debounce(persistPatient, 300);
+
   function persistDebug() {
     saveLocal("debug", {
       showIds: !!els.debugShowIds.checked,
       showCache: !!els.debugShowCache.checked,
     });
     updateCacheUI();
+    clearFilterCache(); // Clear cache when debug settings change
     renderSlots();
   }
 
   function attachGlobalClickClose() {
-    document.addEventListener("click", (e) => {
+    if (globalListenersAttached) return;
+    
+    const handleClick = (e) => {
       if (!state.debugOpen) return;
       const target = e.target;
       const inside = els.debugPanel.contains(target) || els.debugBtn.contains(target);
       if (!inside) setDebugPanel(false);
-    });
-    document.addEventListener("keydown", (e) => {
+    };
+    
+    const handleKeydown = (e) => {
       if (e.key === "Escape") setDebugPanel(false);
-    });
+    };
+    
+    document.addEventListener("click", handleClick);
+    document.addEventListener("keydown", handleKeydown);
+    globalListenersAttached = true;
   }
 
   /** ---------- init ---------- */
@@ -443,8 +560,8 @@ async function fetchSlots() {
     els.timeFilter.addEventListener("change", onTimeChange);
     els.resetFiltersBtn.addEventListener("click", onResetFilters);
 
-    els.patientName.addEventListener("input", persistPatient);
-    els.patientEmail.addEventListener("input", persistPatient);
+    els.patientName.addEventListener("input", debouncedPersistPatient);
+    els.patientEmail.addEventListener("input", debouncedPersistPatient);
 
     els.debugBtn.addEventListener("click", () => setDebugPanel(!state.debugOpen));
     els.debugShowIds.addEventListener("change", persistDebug);
