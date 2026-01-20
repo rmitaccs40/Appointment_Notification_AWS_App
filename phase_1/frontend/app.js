@@ -34,6 +34,8 @@
     toastHost: document.getElementById("toastHost"),
   };
 
+  
+
   /** ---------- helpers ---------- */
   function fmtLocal(ts = new Date()) {
     const d = ts instanceof Date ? ts : new Date(ts);
@@ -59,7 +61,7 @@
   }
 
   function saveLocal(key, value) {
-    try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch { }
   }
   function loadLocal(key, fallback) {
     try {
@@ -107,12 +109,23 @@
     els.statusText.textContent = msg;
   }
 
+  function setLoading(isLoading) {
+  state.loading = isLoading;
+
+  els.refreshBtn.disabled = isLoading;
+  els.resetFiltersBtn.disabled = isLoading;
+
+  // Optional UI feedback
+  els.refreshBtn.textContent = isLoading ? "Loading…" : "Refresh";
+}
+
   /** ---------- state ---------- */
-  const state = {
-    allSlots: [],
-    xCache: null,
-    debugOpen: false,
-  };
+const state = {
+  allSlots: [],
+  xCache: null,
+  debugOpen: false,
+  loading: false,
+};
 
   /** ---------- debug panel ---------- */
   function setDebugPanel(open) {
@@ -138,10 +151,29 @@
   }
 
   /** ---------- rendering ---------- */
+  function timeToMinutes(t) {
+    // expects formats like "09:00 AM", "12:00 PM"
+    const m = String(t).trim().match(/^(\d{1,2}):(\d{2})\s*(AM|PM)$/i);
+    if (!m) return Number.POSITIVE_INFINITY; // push unknown formats to the end
+
+    let hh = parseInt(m[1], 10);
+    const mm = parseInt(m[2], 10);
+    const ampm = m[3].toUpperCase();
+
+    // 12 AM = 0, 12 PM = 12
+    if (ampm === "AM") {
+      if (hh === 12) hh = 0;
+    } else { // PM
+      if (hh !== 12) hh += 12;
+    }
+    return hh * 60 + mm;
+  }
+
   function uniqueTimes(slots) {
     const set = new Set();
     for (const s of slots) if (s.appointmentTime) set.add(s.appointmentTime);
-    return Array.from(set).sort();
+
+    return Array.from(set).sort((a, b) => timeToMinutes(a) - timeToMinutes(b));
   }
 
   function renderTimeOptions(slotsForTime) {
@@ -238,12 +270,16 @@
   }
 
   /** ---------- network ---------- */
-  async function fetchSlots() {
-    if (!apiBaseUrl) {
-      setStatus("Missing API base URL. Please update config.js.");
-      return;
-    }
+async function fetchSlots() {
+  if (state.loading) return;
 
+  if (!apiBaseUrl) {
+    setStatus("Missing API base URL. Please update config.js.");
+    return;
+  }
+
+  setLoading(true);
+  try {
     setStatus("Loading…");
     els.slots.innerHTML = "";
 
@@ -253,8 +289,10 @@
       headers: { "Accept": "application/json" },
     });
 
-    // capture cache header (case-insensitive in browsers via get)
     state.xCache = res.headers.get("x-cache") || res.headers.get("X-Cache");
+    // fallback so UI is clearer when CORS expose is missing:
+    if (!state.xCache) state.xCache = "NOT_EXPOSED_BY_CORS";
+
     updateCacheUI();
 
     if (els.debugShowCache.checked) {
@@ -269,18 +307,24 @@
     const data = await res.json();
     state.allSlots = Array.isArray(data) ? data : [];
 
-    // Derive env pill from API base URL
-    els.envPill.textContent = apiBaseUrl.includes("/prod") ? "PROD" : "DEV";
+    state.allSlots.sort((a, b) => {
+      const d = String(a.appointmentDate || "").localeCompare(String(b.appointmentDate || ""));
+      if (d !== 0) return d;
+      return timeToMinutes(a.appointmentTime) - timeToMinutes(b.appointmentTime);
+    });
 
+    els.envPill.textContent = apiBaseUrl.includes("/prod") ? "PROD" : "DEV";
     els.lastUpdated.textContent = `Last updated: ${fmtLocal(new Date())}`;
 
-    // Time dropdown should reflect the currently selected date (if any)
     const date = els.dateFilter.value;
     const baseForTimes = date ? state.allSlots.filter(s => s.appointmentDate === date) : state.allSlots;
     renderTimeOptions(baseForTimes);
 
     renderSlots();
+  } finally {
+    setLoading(false);
   }
+}
 
   async function bookAppointment(appointmentId) {
     const { name, email } = getPatient();
@@ -319,16 +363,16 @@
     renderSlots();
   }
 
-async function onResetFilters() {
-  els.resetFiltersBtn.disabled = true;
+  async function onResetFilters() {
+    els.resetFiltersBtn.disabled = true;
 
-  els.dateFilter.value = "";
-  els.timeFilter.value = "";
+    els.dateFilter.value = "";
+    els.timeFilter.value = "";
 
-  await fetchSlots(); // ONE refresh, includes toast + cache info
+    await fetchSlots(); // ONE refresh, includes toast + cache info
 
-  els.resetFiltersBtn.disabled = false;
-}
+    els.resetFiltersBtn.disabled = false;
+  }
 
   function persistPatient() {
     const { name, email } = getPatient();
