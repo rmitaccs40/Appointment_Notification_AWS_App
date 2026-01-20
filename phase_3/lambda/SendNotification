@@ -1,0 +1,55 @@
+import json
+import boto3
+import os
+
+sns = boto3.client('sns', region_name='us-east-1')
+dynamodb = boto3.client('dynamodb', region_name='us-east-1')
+
+PATIENT_TOPIC_ARN = os.environ.get('PATIENT_TOPIC_ARN')
+
+def lambda_handler(event, context):
+    """
+    Processes appointment notifications from SQS queue.
+    Retrieves patient details from DynamoDB before sending notification.
+    """
+    
+    for record in event['Records']:
+        message_body = json.loads(record['body'])
+        
+        # Only need appointmentId and status from message
+        appointment_id = message_body.get('appointmentId')
+        status = message_body.get('status')
+        
+        # Query DynamoDB for full appointment details
+        response = dynamodb.get_item(
+            TableName='Appointments',
+            Key={'appointmentId': {'S': appointment_id}}
+        )
+        
+        if 'Item' not in response:
+            print(f"Appointment {appointment_id} not found in DynamoDB")
+            continue
+        
+        # Extract patient details from DynamoDB
+        appointment = response['Item']
+        patient_name = appointment['patientName']['S']
+        appointment_date = appointment['appointmentDate']['S']
+        appointment_time = appointment['appointmentTime']['S']
+        
+        if status == 'ACCEPTED':
+            subject = "Appointment Accepted"
+            message = f"Dear {patient_name},\n\nYour appointment has been accepted.\n\nDetails:\n- ID: {appointment_id}\n- Date: {appointment_date}\n- Time: {appointment_time}\n\nThank you!"
+        elif status == 'DECLINED':
+            subject = "Appointment Declined"
+            message = f"Dear {patient_name},\n\nYour appointment has been declined.\n\nDetails:\n- ID: {appointment_id}\n- Date: {appointment_date}\n- Time: {appointment_time}\n\nPlease book another slot."
+        else:
+            subject = "Appointment Update"
+            message = f"Appointment {appointment_id} status: {status}"
+        
+        sns.publish(
+            TopicArn=PATIENT_TOPIC_ARN,
+            Subject=subject,
+            Message=message
+        )
+    
+    return {'statusCode': 200, 'body': json.dumps({'message': 'Sent'})}
