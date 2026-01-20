@@ -1,77 +1,116 @@
 import json
 import os
 import boto3
+import base64
 from botocore.exceptions import ClientError
+import redis
 
 REGION = os.getenv("AWS_REGION", "us-east-1")
 TABLE_NAME = os.getenv("TABLE_NAME", "Appointments")
 
-dynamodb = boto3.client("dynamodb", region_name=REGION)
+# Cache settings
+REDIS_HOST = os.getenv("REDIS_HOST")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+CACHE_KEY = "available_slots"
 
-def resp(status_code: int, body: dict):
+dynamodb = boto3.resource("dynamodb", region_name=REGION)
+table = dynamodb.Table(TABLE_NAME)
+
+CORS_HEADERS = {
+    "Content-Type": "application/json",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "POST,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type",
+}
+
+def resp(status_code, body):
     return {
         "statusCode": status_code,
-        "headers": {
-            "Content-Type": "application/json",
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Methods": "POST,OPTIONS",
-            "Access-Control-Allow-Headers": "Content-Type"
-        },
-        "body": json.dumps(body)
+        "headers": CORS_HEADERS,
+        "body": json.dumps(body),
     }
 
-def handler(event, context):
+def get_method(event):
+    # REST API (v1)
+    if event.get("httpMethod"):
+        return event["httpMethod"]
+    # HTTP API (v2)
+    return event.get("requestContext", {}).get("http", {}).get("method")
+
+def get_body_json(event):
+    raw = event.get("body")
+    if raw is None:
+        return {}
+    if event.get("isBase64Encoded"):
+        raw = base64.b64decode(raw).decode("utf-8")
+    if isinstance(raw, str):
+        return json.loads(raw) if raw else {}
+    return raw  # already dict
+
+def invalidate_cache():
+    """
+    Best-effort cache invalidation.
+    If Redis is not configured or unreachable, ignore and continue.
+    """
+    if not REDIS_HOST:
+        return
     try:
-        raw_body = event.get("body") or "{}"
-        if isinstance(raw_body, str):
-            body = json.loads(raw_body)
-        else:
-            body = raw_body
+        r = redis.Redis(
+            host=REDIS_HOST,
+            port=REDIS_PORT,
+            ssl=True,  # ElastiCache Serverless uses TLS in transit
+            socket_connect_timeout=0.5,
+            socket_timeout=0.5,
+            decode_responses=True,
+        )
+        r.delete(CACHE_KEY)
+        print(f"Cache invalidated: {CACHE_KEY}")
+    except Exception as e:
+        print("Cache invalidation skipped:", repr(e))
+
+def lambda_handler(event, context):
+    method = get_method(event)
+
+    # Preflight
+    if method == "OPTIONS":
+        return resp(200, {"ok": True})
+
+    if method != "POST":
+        return resp(405, {"error": "Method not allowed", "got": method})
+
+    try:
+        body = get_body_json(event)
 
         appointment_id = body.get("appointmentId")
         patient_email = body.get("patientEmail")
+        patient_name = body.get("patientName", "")
 
         if not appointment_id or not patient_email:
-            return resp(400, {"error": "appointmentId and patientEmail are required"})
+            return resp(400, {"error": "Missing required fields: appointmentId, patientEmail"})
 
-        # Optional fields (safe to store if you want)
-        patient_name = body.get("patientName", "")
-        notes = body.get("notes", "")
+        table.update_item(
+            Key={"appointmentId": appointment_id},
+            UpdateExpression="SET #s = :new, patientEmail = :e, patientName = :n",
+            ConditionExpression="#s = :available",
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":new": "PENDING",
+                ":available": "AVAILABLE",
+                ":e": patient_email,
+                ":n": patient_name,
+            },
+        )
 
-        # Conditional update: only if status is AVAILABLE
-        try:
-            update_expr = "SET #s = :pending, patientEmail = :email"
-            expr_attr_names = {"#s": "status"}
-            expr_attr_values = {
-                ":pending": {"S": "PENDING"},
-                ":available": {"S": "AVAILABLE"},
-                ":email": {"S": patient_email}
-            }
+        # Invalidate cached slot list so next GET refreshes from DynamoDB
+        invalidate_cache()
 
-            # Add optional fields if present
-            if patient_name:
-                update_expr += ", patientName = :name"
-                expr_attr_values[":name"] = {"S": patient_name}
-            if notes:
-                update_expr += ", notes = :notes"
-                expr_attr_values[":notes"] = {"S": notes}
+        return resp(200, {"message": "Booked successfully", "appointmentId": appointment_id, "status": "PENDING"})
 
-            dynamodb.update_item(
-                TableName=TABLE_NAME,
-                Key={"appointmentId": {"S": appointment_id}},
-                UpdateExpression=update_expr,
-                ConditionExpression="#s = :available",
-                ExpressionAttributeNames=expr_attr_names,
-                ExpressionAttributeValues=expr_attr_values
-            )
-
-        except ClientError as e:
-            code = e.response.get("Error", {}).get("Code", "")
-            if code == "ConditionalCheckFailedException":
-                return resp(409, {"error": "Slot is not AVAILABLE (already booked or pending)."})
-            return resp(500, {"error": f"DynamoDB error: {str(e)}"})
-
-        return resp(200, {"status": "PENDING", "message": "Booking submitted."})
+    except ClientError as e:
+        code = e.response.get("Error", {}).get("Code", "")
+        if code == "ConditionalCheckFailedException":
+            return resp(409, {"error": "Slot is no longer available"})
+        return resp(500, {"error": "DynamoDB error", "detail": str(e)})
 
     except Exception as e:
-        return resp(500, {"error": str(e)})
+        return resp(500, {"error": "Server error", "detail": str(e)})

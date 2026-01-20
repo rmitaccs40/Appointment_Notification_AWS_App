@@ -43,6 +43,19 @@
     return `${pad(d.getDate())}/${pad(d.getMonth() + 1)}/${d.getFullYear()}, ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
   }
 
+  function todayISO() {
+    const today = new Date();
+    const year = today.getFullYear();
+    const month = String(today.getMonth() + 1).padStart(2, '0');
+    const day = String(today.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
+
+  function isDateInPast(dateStr) {
+    if (!dateStr) return false;
+    return dateStr < todayISO();
+  }
+
   function toast(title, detail) {
     const node = document.createElement("div");
     node.className = "toast";
@@ -194,6 +207,8 @@ const state = {
     const time = els.timeFilter.value;
 
     return slots.filter((s) => {
+      // Always filter out past dates
+      if (isDateInPast(s.appointmentDate)) return false;
       if (date && s.appointmentDate !== date) return false;
       if (time && s.appointmentTime !== time) return false;
       return true;
@@ -416,6 +431,9 @@ async function fetchSlots() {
     const debug = loadLocal("debug", { showIds: false, showCache: false });
     els.debugShowIds.checked = !!debug.showIds;
     els.debugShowCache.checked = !!debug.showCache;
+
+    // Set date filter to today by default
+    els.dateFilter.value = todayISO();
 
     updatePatientHint();
     updateCacheUI();
