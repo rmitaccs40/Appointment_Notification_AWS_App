@@ -1,0 +1,43 @@
+{
+  "StartAt": "NotifyBothParties",
+  "States": {
+    "NotifyBothParties": {
+      "Type": "Parallel",
+      "Branches": [
+        {
+          "StartAt": "SendAdminConfirmation",
+          "States": {
+            "SendAdminConfirmation": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "arn:aws:sns:us-east-1:796645842706:AdminNotificationTopic",
+                "Subject.$": "States.Format('Appointment {}: {}', $.status, $.appointmentId)",
+                "Message": "Admin notification: Appointment status updated."
+              },
+              "End": true
+            }
+          }
+        },
+        {
+          "StartAt": "QueuePatientNotification",
+          "States": {
+            "QueuePatientNotification": {
+              "Type": "Task",
+              "Resource": "arn:aws:states:::sqs:sendMessage",
+              "Parameters": {
+                "QueueUrl": "https://sqs.us-east-1.amazonaws.com/796645842706/NotificationQueue",
+                "MessageBody": {
+                  "appointmentId.$": "$.appointmentId",
+                  "status.$": "$.status"
+                }
+              },
+              "End": true
+            }
+          }
+        }
+      ],
+      "End": true
+    }
+  }
+}
